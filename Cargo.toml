@@ -2,5 +2,11 @@
 name = "salsa20"
 version = "0.1.0"
 edition = "2024"
+authors = ["Samuel Schlesinger <sgschlesinger@gmail.com>"]
+description = "A pure Rust implementation of the Salsa20 stream cipher"
+license = "MIT"
+repository = "https://github.com/samuelschlesinger/salsa20"
+keywords = ["crypto", "salsa20", "cipher", "encryption"]
+categories = ["cryptography", "algorithms"]
 
 [dependencies]

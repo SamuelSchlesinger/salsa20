@@ -11,3 +11,10 @@ categories = ["cryptography", "algorithms"]
 
 [dependencies]
 rand_core = "0.9.3"
+
+[dev-dependencies]
+criterion = "0.5.1"
+
+[[bench]]
+name = "benchmarks"
+harness = false

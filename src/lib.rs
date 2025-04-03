@@ -9,6 +9,7 @@
 //! 
 //! - Support for both 16-byte (128-bit) and 32-byte (256-bit) keys
 //! - Simple API for encryption and decryption
+//! - PRNG implementation that implements the `rand_core` traits
 //! - Pure Rust implementation
 //! 
 //! ## Example
@@ -34,9 +35,25 @@
 //! ```
 //! 
 //! For 128-bit keys, use the `salsa20_encrypt_k16` and `salsa20_decrypt_k16` functions.
-
-/// A 32-bit word used throughout the Salsa20 algorithm.
-type Word = u32;
+//!
+//! ## Using as a PRNG
+//!
+//! ```
+//! use salsa20::Salsa20Rng;
+//! use rand_core::{RngCore, SeedableRng};
+//! 
+//! // Create a seeded RNG
+//! let seed = [0u8; 32]; // Use a more secure seed in real applications
+//! let mut rng = Salsa20Rng::from_seed(seed);
+//! 
+//! // Generate random values
+//! let random_u32 = rng.next_u32();
+//! let random_u64 = rng.next_u64();
+//! 
+//! // Fill a buffer with random bytes
+//! let mut buffer = [0u8; 10];
+//! rng.fill_bytes(&mut buffer);
+//! ```
 
 /// A quarter block consisting of 4 words used in the quarterround operation.
 type Quarter = [u32; 4];
@@ -281,7 +298,7 @@ fn test_littleendian() {
 /// * A 64-byte array representing the output
 fn salsa20(x: [u8; 64]) -> [u8; 64] {
     // Convert input bytes to 16 little-endian 32-bit words
-    let mut x = [
+    let x = [
         u32::from_le_bytes([x[0], x[1], x[2], x[3]]),
         u32::from_le_bytes([x[4], x[5], x[6], x[7]]),
         u32::from_le_bytes([x[8], x[9], x[10], x[11]]),
@@ -758,4 +775,212 @@ fn test_salsa20_k16_encryption_decryption() {
     let ciphertext = salsa20_encrypt_k16(&long_message, key);
     let decrypted = salsa20_decrypt_k16(&ciphertext, key);
     assert_eq!(decrypted, long_message);
+}
+
+// Re-export rand_core traits for user convenience
+pub use rand_core::{RngCore, SeedableRng, CryptoRng};
+
+/// A pseudorandom number generator based on the Salsa20 stream cipher.
+///
+/// This RNG implements the `rand_core` traits (`RngCore`, `SeedableRng`, and `CryptoRng`),
+/// making it suitable for cryptographic applications that require a secure source
+/// of randomness.
+///
+/// # Examples
+///
+/// ```
+/// use salsa20::Salsa20Rng;
+/// use rand_core::{RngCore, SeedableRng};
+///
+/// // Create a seeded RNG
+/// let seed = [0u8; 32]; // Use a more secure seed in real applications
+/// let mut rng = Salsa20Rng::from_seed(seed);
+///
+/// // Generate random values
+/// let random_u32 = rng.next_u32();
+/// let random_u64 = rng.next_u64();
+///
+/// // Fill a buffer with random bytes
+/// let mut buffer = [0u8; 10];
+/// rng.fill_bytes(&mut buffer);
+/// ```
+#[derive(Clone, Debug)]
+pub struct Salsa20Rng {
+    /// The first half of the 32-byte key (16 bytes)
+    k0: [u8; 16],
+    /// The second half of the 32-byte key (16 bytes)
+    k1: [u8; 16],
+    /// Current block counter
+    block_counter: u64,
+    /// Current position within the block
+    position: usize,
+    /// Current keystream block
+    current_block: [u8; 64],
+}
+
+impl Salsa20Rng {
+    /// Creates a new Salsa20Rng from a 32-byte seed.
+    ///
+    /// # Arguments
+    ///
+    /// * `seed` - A 32-byte seed used to initialize the RNG
+    ///
+    /// # Returns
+    ///
+    /// * A new Salsa20Rng instance
+    pub fn new(seed: [u8; 32]) -> Self {
+        let mut k0 = [0u8; 16];
+        let mut k1 = [0u8; 16];
+        
+        k0.copy_from_slice(&seed[0..16]);
+        k1.copy_from_slice(&seed[16..32]);
+        
+        let mut rng = Self {
+            k0,
+            k1,
+            block_counter: 0,
+            position: 64, // Force generation of first block on first use
+            current_block: [0u8; 64],
+        };
+        
+        // Generate the first block
+        rng.generate_block();
+        
+        rng
+    }
+    
+    /// Generates a new keystream block.
+    fn generate_block(&mut self) {
+        // Create nonce with block counter
+        let mut nonce = [0u8; 16];
+        let counter_bytes = self.block_counter.to_le_bytes();
+        nonce[0..8].copy_from_slice(&counter_bytes);
+        
+        // Generate new keystream block
+        self.current_block = salsa20k32(self.k0, self.k1, nonce);
+        
+        // Reset position and increment counter
+        self.position = 0;
+        self.block_counter += 1;
+    }
+}
+
+impl RngCore for Salsa20Rng {
+    fn next_u32(&mut self) -> u32 {
+        // Ensure we have enough bytes for a u32
+        if self.position > 60 { // 64 - 4 = 60
+            self.generate_block();
+        }
+        
+        // Extract the next 4 bytes from the current block
+        let bytes = [
+            self.current_block[self.position],
+            self.current_block[self.position + 1],
+            self.current_block[self.position + 2],
+            self.current_block[self.position + 3],
+        ];
+        
+        // Update position
+        self.position += 4;
+        
+        // Convert to u32 in little-endian format
+        u32::from_le_bytes(bytes)
+    }
+    
+    fn next_u64(&mut self) -> u64 {
+        // Get two u32 values and combine them
+        let low = self.next_u32() as u64;
+        let high = self.next_u32() as u64;
+        
+        // Combine into a u64
+        (high << 32) | low
+    }
+    
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        let mut i = 0;
+        while i < dest.len() {
+            // Check if we need a new block
+            if self.position >= 64 {
+                self.generate_block();
+            }
+            
+            // Calculate how many bytes we can copy from the current block
+            let available = 64 - self.position;
+            let needed = dest.len() - i;
+            let to_copy = available.min(needed);
+            
+            // Copy bytes from the current block to the destination
+            dest[i..i + to_copy].copy_from_slice(&self.current_block[self.position..self.position + to_copy]);
+            
+            // Update position and counter
+            self.position += to_copy;
+            i += to_copy;
+        }
+    }
+}
+
+impl SeedableRng for Salsa20Rng {
+    type Seed = [u8; 32];
+    
+    /// Creates a new Salsa20Rng from a 32-byte seed.
+    fn from_seed(seed: Self::Seed) -> Self {
+        Self::new(seed)
+    }
+}
+
+// Mark Salsa20Rng as a cryptographically secure RNG
+impl CryptoRng for Salsa20Rng {}
+
+#[test]
+fn test_salsa20_rng() {
+    use rand_core::{RngCore, SeedableRng};
+    
+    // Create two differently seeded RNGs
+    let seed1 = [0u8; 32];
+    let seed2 = [1u8; 32];
+    
+    let mut rng1 = Salsa20Rng::from_seed(seed1);
+    let mut rng2 = Salsa20Rng::from_seed(seed2);
+    
+    // Generate random numbers from both RNGs
+    let n1_1 = rng1.next_u32();
+    let n1_2 = rng1.next_u32();
+    let n2_1 = rng2.next_u32();
+    let n2_2 = rng2.next_u32();
+    
+    // Ensure that different seeds produce different sequences
+    assert_ne!(n1_1, n2_1);
+    assert_ne!(n1_2, n2_2);
+    
+    // Ensure that the same seed produces the same sequence
+    let mut rng1_clone = Salsa20Rng::from_seed(seed1);
+    assert_eq!(rng1_clone.next_u32(), n1_1);
+    assert_eq!(rng1_clone.next_u32(), n1_2);
+    
+    // Test fill_bytes
+    let mut buffer1 = [0u8; 100];
+    let mut buffer2 = [0u8; 100];
+    
+    let mut rng3 = Salsa20Rng::from_seed(seed1);
+    let mut rng4 = Salsa20Rng::from_seed(seed2);
+    
+    rng3.fill_bytes(&mut buffer1);
+    rng4.fill_bytes(&mut buffer2);
+    
+    // Different seeds should produce different byte sequences
+    assert_ne!(buffer1, buffer2);
+    
+    // Test consecutive calls with the same RNG produce different outputs
+    let mut rng5 = Salsa20Rng::from_seed(seed1);
+    let n5_1 = rng5.next_u64();
+    let n5_2 = rng5.next_u64();
+    assert_ne!(n5_1, n5_2);
+    
+    // Test cross-block generation (each block is 64 bytes)
+    let mut rng6 = Salsa20Rng::from_seed(seed1);
+    let mut large_buffer = [0u8; 200]; // Spans multiple blocks
+    rng6.fill_bytes(&mut large_buffer);
+    
+    // Ensure content is not just zeros
+    assert_ne!(large_buffer, [0u8; 200]);
 }

@@ -10,3 +10,4 @@ keywords = ["crypto", "salsa20", "cipher", "encryption"]
 categories = ["cryptography", "algorithms"]
 
 [dependencies]
+rand_core = "0.9.3"
